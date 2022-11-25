@@ -60,6 +60,19 @@ export default defineComponent({
 				});
 			}
 
+			if (localType.value === 'image_transformations') {
+				tabs.splice(
+					1,
+					0,
+					...[
+						{
+							text: t('image_transformations'),
+							value: 'relationship',
+						},
+					]
+				);
+			}
+
 			if (localType.value === 'translations') {
 				tabs.splice(
 					1,

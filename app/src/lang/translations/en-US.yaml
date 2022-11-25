@@ -303,6 +303,7 @@ m2a_relationship: Many to Any Relationship
 invalid_item: Invalid Item
 next: Next
 field_name: Field Name
+image_transformations: Image Transformations
 translations: Translations
 no_translations: No Translations
 left_to_right: Left to Right
@@ -371,6 +372,8 @@ this_collection: This Collection
 related_collection: Related Collection
 related_collections: Related Collections
 translations_collection: Translation Collection
+files_collection: Files Collection
+image_transformation_collection: Image Transformation Collection
 languages_collection: Languages Collection
 import_data_input_placeholder: CSV or JSON...
 import_data_button: Start Import
@@ -580,6 +583,7 @@ bookmark_doesnt_exist_copy: The bookmark you're trying to open couldn't be found
 bookmark_doesnt_exist_cta: Return to collection
 select_an_item: Select an item...
 edit: Edit
+edit_image_transformation_details: Edit Image Transformation Details
 enabled: Enabled
 disable_tfa: Disable 2FA
 tfa_scan_code: Scan the code in your authenticator app to finish setting up 2FA
@@ -588,6 +592,7 @@ create_account: Create Account
 account_created_successfully: Account Created Successfully
 auto_fill: Auto Fill
 corresponding_field: Corresponding Field
+required_junction_collection_fields: Required Junction Collection Fields
 errors:
   COLLECTION_NOT_FOUND: "Collection doesn't exist"
   FIELD_NOT_FOUND: Field not found
@@ -1589,6 +1594,11 @@ interfaces:
     search_for_icon: Search for icon...
   file-image:
     image: Image
+    description: Select or upload an image
+    crop: Crop to Fit
+    crop_label: Crop image as needed
+  file-image-transformation:
+    image: Image Transformation
     description: Select or upload an image
     crop: Crop to Fit
     crop_label: Crop image as needed

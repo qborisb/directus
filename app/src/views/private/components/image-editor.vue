@@ -18,7 +18,9 @@
 			<v-progress-circular indeterminate />
 		</div>
 
-		<v-notice v-else-if="error" type="error">error</v-notice>
+		<div class="warnings">
+			<v-notice v-if="!loading && error" type="error">error</v-notice>
+		</div>
 
 		<div v-show="imageData && !loading && !error" class="editor-container">
 			<div class="editor">
@@ -125,7 +127,7 @@
 
 <script lang="ts">
 import api, { addTokenToURL } from '@/api';
-import { computed, defineComponent, nextTick, reactive, ref, watch } from 'vue';
+import { computed, defineComponent, PropType, nextTick, reactive, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 
 import { useSettingsStore } from '@/stores/settings';
@@ -134,6 +136,7 @@ import { unexpectedError } from '@/utils/unexpected-error';
 import Cropper from 'cropperjs';
 import throttle from 'lodash/throttle';
 import { nanoid } from 'nanoid/non-secure';
+import { cloneDeep } from 'lodash';
 
 type Image = {
 	type: string;
@@ -141,6 +144,27 @@ type Image = {
 	filename_download: string;
 	width: number;
 	height: number;
+};
+
+type CropCoordinates = {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+};
+
+type TransformationInfo = {
+	coordinates: CropCoordinates | null;
+	imageTransformations: {
+		flipY: boolean;
+		flipX: boolean;
+		rotate: number | null;
+	} | null;
+	transformationCollection: string | null;
+	id: string | number | null | Record<string, any>;
+	collection: string;
+	fileID: string | null;
+	item: string | null;
 };
 
 export default defineComponent({
@@ -153,8 +177,12 @@ export default defineComponent({
 			type: Boolean,
 			default: undefined,
 		},
+		transformationInfo: {
+			type: Object as PropType<TransformationInfo>,
+			default: undefined,
+		},
 	},
-	emits: ['update:modelValue', 'refresh'],
+	emits: ['update:modelValue', 'refresh', 'update-transformation-info'],
 	setup(props, { emit }) {
 		const { t, n } = useI18n();
 
@@ -203,8 +231,56 @@ export default defineComponent({
 
 		const randomId = ref<string>(nanoid());
 
+		const imageTransformations = computed(() => {
+			if (props.transformationInfo?.imageTransformations) {
+				return cloneDeep(props.transformationInfo?.imageTransformations);
+			} else {
+				return {
+					flipY: false,
+					flipX: false,
+					rotate: null,
+				};
+			}
+		});
+
+		const coordinates = computed(() => {
+			if (
+				props.transformationInfo &&
+				props.transformationInfo.coordinates &&
+				imageData.value &&
+				cropperInstance.value
+			) {
+				let x = props.transformationInfo.coordinates.x;
+				let y = props.transformationInfo.coordinates.y;
+				const cropWidth = props.transformationInfo.coordinates.width;
+				const cropHeight = props.transformationInfo.coordinates.height;
+
+				const rotate = props.transformationInfo.imageTransformations?.rotate;
+				const width = rotate != null && rotate % 180 != 0 ? imageData.value.height : imageData.value.width;
+				const height = rotate != null && rotate % 180 != 0 ? imageData.value.width : imageData.value.height;
+
+				if (imageTransformations.value.flipY) {
+					x = width - props.transformationInfo.coordinates.width - props.transformationInfo.coordinates.x;
+				}
+				if (imageTransformations.value.flipX) {
+					y = height - props.transformationInfo.coordinates.height - props.transformationInfo.coordinates.y;
+				}
+
+				return {
+					x: x,
+					y: y,
+					width: cropWidth,
+					height: cropHeight,
+				};
+			} else {
+				return undefined;
+			}
+		});
+
 		const imageURL = computed(() => {
-			return addTokenToURL(`${getRootPath()}assets/${props.id}?${randomId.value}`);
+			let url = `${getRootPath()}assets/${props.id}?${randomId.value}`;
+			url = applyImageTransformationsToUrl(url);
+			return addTokenToURL(url);
 		});
 
 		const dimensionsString = computed(() => {
@@ -261,6 +337,31 @@ export default defineComponent({
 			customAspectRatios,
 		};
 
+		function applyImageTransformationsToUrl(url: string): string {
+			let readyTransformations = [];
+
+			if (props.transformationInfo && props.transformationInfo.imageTransformations) {
+				const flipY = props.transformationInfo.imageTransformations.flipY;
+				const flipX = props.transformationInfo.imageTransformations.flipX;
+				if (flipX) {
+					readyTransformations.push('["flip"]');
+				}
+				if (flipY) {
+					readyTransformations.push('["flop"]');
+				}
+				let rotation = props.transformationInfo.imageTransformations.rotate;
+				if (rotation) {
+					readyTransformations.push(`["rotate", ${rotation}]`);
+				}
+			}
+
+			if (readyTransformations.length > 0) {
+				url += `&transforms=[${readyTransformations.join(',')}]`;
+			}
+
+			return url;
+		}
+
 		function useImage() {
 			const loading = ref(false);
 			const error = ref(null);
@@ -315,7 +416,58 @@ export default defineComponent({
 						formData.append('file', blob, imageData.value?.filename_download);
 
 						try {
-							await api.patch(`/files/${props.id}`, formData);
+							const cropperData = cropperInstance.value?.getData();
+
+							if (
+								cropperData &&
+								imageData.value &&
+								props.transformationInfo &&
+								props.transformationInfo.transformationCollection &&
+								props.transformationInfo.id
+							) {
+								const inverse = imageTransformations.value.flipX
+									? !imageTransformations.value.flipY
+									: imageTransformations.value.flipY;
+
+								const rotation = inverse ? cropperData.rotate : -cropperData.rotate;
+
+								imageTransformations.value.rotate =
+									imageTransformations.value.rotate != null ? imageTransformations.value.rotate - rotation : -rotation;
+
+								imageTransformations.value.rotate > 0
+									? (imageTransformations.value.rotate %= 360)
+									: (imageTransformations.value.rotate %= -360);
+
+								const width =
+									imageTransformations.value.rotate != null && imageTransformations.value.rotate % 180 != 0
+										? imageData.value.height
+										: imageData.value.width;
+								const height =
+									imageTransformations.value.rotate != null && imageTransformations.value.rotate % 180 != 0
+										? imageData.value.width
+										: imageData.value.height;
+
+								const coordinates = cropping.value
+									? {
+											x: imageTransformations.value.flipY
+												? width - (Math.round(cropperData.x) + Math.round(cropperData.width))
+												: Math.round(cropperData.x),
+											y: imageTransformations.value.flipX
+												? height - (Math.round(cropperData.y) + Math.round(cropperData.height))
+												: Math.round(cropperData.y),
+											width: Math.round(cropperData.width),
+											height: Math.round(cropperData.height),
+									  }
+									: { x: null, y: null, width: null, height: null };
+
+								emit('update-transformation-info', {
+									...coordinates,
+									image_transformations: imageTransformations.value,
+								});
+							} else {
+								await api.patch(`/files/${props.id}`, formData);
+							}
+
 							emit('refresh');
 							internalActive.value = false;
 							randomId.value = nanoid();
@@ -466,23 +618,49 @@ export default defineComponent({
 						}
 					}, 50),
 				});
+
+				setTimeout(() => {
+					if (coordinates.value) {
+						cropperInstance.value?.crop();
+						cropperInstance.value?.setData({
+							x: coordinates.value.x,
+							y: coordinates.value.y,
+							width: coordinates.value.width,
+							height: coordinates.value.height,
+						});
+						dragMode.value = 'crop';
+					}
+				}, 100);
 			}
 
 			function flip(type: 'horizontal' | 'vertical') {
-				if (type === 'vertical') {
-					if (cropperInstance.value?.getData().scaleX === -1) {
-						cropperInstance.value?.scaleX(1);
-					} else {
-						cropperInstance.value?.scaleX(-1);
+				const cropperData = cropperInstance.value?.getData();
+				if (cropperData) {
+					if (type === 'vertical') {
+						scaleX();
+						imageTransformations.value.flipY = !imageTransformations.value.flipY;
+					}
+
+					if (type === 'horizontal') {
+						scaleY();
+						imageTransformations.value.flipX = !imageTransformations.value.flipX;
 					}
 				}
+			}
 
-				if (type === 'horizontal') {
-					if (cropperInstance.value?.getData().scaleY === -1) {
-						cropperInstance.value?.scaleY(1);
-					} else {
-						cropperInstance.value?.scaleY(-1);
-					}
+			function scaleX() {
+				if (cropperInstance.value?.getData().scaleX === -1) {
+					cropperInstance.value?.scaleX(1);
+				} else {
+					cropperInstance.value?.scaleX(-1);
+				}
+			}
+
+			function scaleY() {
+				if (cropperInstance.value?.getData().scaleY === -1) {
+					cropperInstance.value?.scaleY(1);
+				} else {
+					cropperInstance.value?.scaleY(-1);
 				}
 			}
 
@@ -554,6 +732,16 @@ export default defineComponent({
 
 .spacer {
 	flex-grow: 1;
+}
+
+.warnings {
+	width: 2/3;
+	position: absolute;
+	z-index: 9999;
+	margin: 20px 20px 0;
+
+	display: grid;
+	grid-gap: 10px;
 }
 
 .dimensions {

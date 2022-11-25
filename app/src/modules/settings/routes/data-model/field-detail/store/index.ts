@@ -1,6 +1,4 @@
 import { defineStore } from 'pinia';
-import { getInterfaces } from '@/interfaces';
-import { getDisplays } from '@/displays';
 import { has, isEmpty, orderBy, cloneDeep } from 'lodash';
 import {
 	InterfaceConfig,
@@ -22,6 +20,7 @@ import { useRelationsStore } from '@/stores/relations';
 import * as alterations from './alterations';
 import { getLocalTypeForField } from '@/utils/get-local-type';
 import api from '@/api';
+import { useExtensions } from '@/extensions';
 
 export function syncFieldDetailStoreProperty(path: string, defaultValue?: any) {
 	const fieldDetailStore = useFieldDetailStore();
@@ -74,6 +73,14 @@ export const useFieldDetailStore = defineStore({
 			oneCollectionField: undefined as DeepPartial<Field> | undefined,
 		},
 
+		relatedCollectionFields: {
+			m2o: undefined as [DeepPartial<Field>] | undefined,
+			o2m: undefined as [DeepPartial<Field>] | undefined,
+		},
+
+		// Create the field on the current collection
+		createFieldOnCurrentCollection: true,
+
 		// Any items that need to be injected into any collection
 		items: {} as Record<string, Record<string, any>[]>,
 
@@ -105,7 +112,7 @@ export const useFieldDetailStore = defineStore({
 					(relation) => relation.related_collection === collection && relation.meta?.one_field === field
 				) as DeepPartial<Relation> | undefined;
 
-				if (['files', 'm2m', 'translations', 'm2a'].includes(this.localType)) {
+				if (['files', 'm2m', 'translations', 'm2a', 'image_transformations'].includes(this.localType)) {
 					// These types rely on directus_relations fields being said, so meta should exist for these particular relations
 					this.relations.m2o = relations.find((relation) => relation.meta?.id !== this.relations.o2m?.meta?.id) as
 						| DeepPartial<Relation>
@@ -183,7 +190,9 @@ export const useFieldDetailStore = defineStore({
 			this.saving = true;
 
 			try {
-				await fieldsStore.upsertField(this.collection, this.editing, this.field);
+				if (this.createFieldOnCurrentCollection) {
+					await fieldsStore.upsertField(this.collection, this.editing, this.field);
+				}
 
 				for (const collection of Object.values(this.collections)) {
 					if (!collection || !collection.collection) continue;
@@ -200,8 +209,43 @@ export const useFieldDetailStore = defineStore({
 					await relationsStore.upsertRelation(relation.collection, relation.field, relation);
 				}
 
+				for (const [relationType, fields] of Object.entries(this.relatedCollectionFields)) {
+					const relation = this.relations[relationType as keyof typeof this.relatedCollectionFields];
+					if (fields) {
+						for (const field of fields) {
+							if (relation && relation.collection && field.field) {
+								await fieldsStore.upsertField(relation.collection, field.field, field);
+							}
+						}
+					}
+				}
+
 				for (const collection of Object.keys(this.items)) {
 					await api.post(`/items/${collection}`, this.items[collection]);
+				}
+
+				for (const relation of Object.values(this.relations)) {
+					if (!relation || !relation.collection || !relation.field) continue;
+
+					if (relation.meta && relation.meta.one_allowed_collections) {
+						const linkCollectionsToJunction = relation.meta.link_one_allowed_collections_back;
+						const linkCollectionsToJunctionField = relation.meta.one_allowed_collections_relation_field;
+						if (linkCollectionsToJunction && linkCollectionsToJunctionField && relation.meta) {
+							for (const oneAllowedCollection of relation.meta.one_allowed_collections) {
+								await fieldsStore.upsertField(oneAllowedCollection, '+', {
+									field: linkCollectionsToJunctionField,
+									type: 'integer',
+									meta: { interface: this.field.meta?.interface },
+								});
+								await relationsStore.upsertRelation(oneAllowedCollection, linkCollectionsToJunctionField, {
+									related_collection: relation.collection,
+									collection: oneAllowedCollection,
+									field: linkCollectionsToJunctionField,
+									schema: { on_delete: 'SET DEFAULT' },
+								});
+							}
+						}
+					}
 				}
 
 				await fieldsStore.hydrate();
@@ -237,6 +281,18 @@ export const useFieldDetailStore = defineStore({
 				requiredProperties.push('relations.o2m.collection', 'relations.o2m.field', 'relations.o2m.related_collection');
 			}
 
+			if (localType == 'image_transformations') {
+				requiredProperties.push(
+					'relations.o2m.collection',
+					'relations.o2m.field',
+					'relations.o2m.related_collection',
+					'relations.m2o.collection',
+					'relations.m2o.field',
+					'relations.m2o.meta.one_allowed_collections',
+					'relations.m2o.meta.one_collection_field'
+				);
+			}
+
 			if (localType === 'm2a') {
 				requiredProperties.push(
 					'relations.o2m.collection',
@@ -259,7 +315,7 @@ export const useFieldDetailStore = defineStore({
 			return missing.length === 0;
 		},
 		interfacesForType(): InterfaceConfig[] {
-			const { interfaces } = getInterfaces();
+			const { interfaces } = useExtensions();
 
 			return orderBy(
 				interfaces.value.filter((inter: InterfaceConfig) => {
@@ -275,7 +331,7 @@ export const useFieldDetailStore = defineStore({
 			);
 		},
 		displaysForType(): DisplayConfig[] {
-			const { displays } = getDisplays();
+			const { displays } = useExtensions();
 
 			return orderBy(
 				displays.value.filter((inter: DisplayConfig) => {
@@ -288,6 +344,8 @@ export const useFieldDetailStore = defineStore({
 			);
 		},
 		generationInfo() {
+			const fieldsStore = useFieldsStore();
+
 			const items: { name: string; type: 'collection' | 'field' }[] = [];
 
 			for (const collection of Object.values(this.collections)) {
@@ -301,11 +359,45 @@ export const useFieldDetailStore = defineStore({
 
 			for (const field of Object.values(this.fields)) {
 				if (!field || !field.collection || !field.field) continue;
-
 				items.push({
 					name: `${field.collection}.${field.field}`,
 					type: 'field',
 				});
+			}
+
+			for (const relation of Object.values(this.relations)) {
+				if (!relation || !relation.collection || !relation.field) continue;
+
+				if (relation.meta) {
+					const linkCollectionsToJunction = relation.meta.link_one_allowed_collections_back;
+					const linkCollectionsToJunctionField = relation.meta.one_allowed_collections_relation_field;
+					if (linkCollectionsToJunction && linkCollectionsToJunctionField && relation.meta.one_allowed_collections) {
+						for (const oneAllowedCollection of relation.meta.one_allowed_collections) {
+							items.push({
+								name: `${oneAllowedCollection}.${linkCollectionsToJunctionField}`,
+								type: 'field',
+							});
+						}
+					}
+				}
+			}
+
+			for (const [relationType, fields] of Object.entries(this.relatedCollectionFields)) {
+				const relation = this.relations[relationType as keyof typeof this.relatedCollectionFields];
+
+				if (fields && relation && relation.collection) {
+					for (const field of fields) {
+						if (field.field) {
+							const fieldExists = fieldsStore.getField(relation.collection, field.field) != null;
+							if (!fieldExists) {
+								items.push({
+									name: `${relation.collection}.${field.field}`,
+									type: 'field',
+								});
+							}
+						}
+					}
+				}
 			}
 
 			return items;
